@@ -1,0 +1,642 @@
+# Data Collection TP - Streamlit V3
+# Application: scraping, download, dashboard, filtering and evaluation.
+import os, sys, subprocess, time
+from pathlib import Path
+import pandas as pd
+import streamlit as st
+from data_database import (
+    init_database, sync_dataset, read_table, table_count,
+    list_tables, database_path, database_size
+)
+
+# CONFIGURATION: chemins et fichiers utilisés par l'application.
+ROOT=Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+SCRAPING=ROOT/'scraping'; RAW=ROOT/'data'/'raw'; CLEANED=ROOT/'data'/'cleaned'
+BOOKS=SCRAPING/'books_scraper.py'; BOOKS_DETAILS=SCRAPING/'complete_books_details.py'
+GAARAAS=SCRAPING/'gaaraas_full_scraper.py'; GAARAAS_RESUME=SCRAPING/'gaaraas_resume_scraper.py'
+BOOK_FILES=[RAW/'books_raw_webscraper.csv',CLEANED/'books_full.csv',CLEANED/'books_clean.csv']
+GAARAAS_FILES=[RAW/'gaaraas_raw_webscraper.csv',CLEANED/'gaaraas_full.csv',CLEANED/'gaaraas_clean.csv']
+
+st.set_page_config(page_title='Data Collection TP',page_icon='📊',layout='wide',initial_sidebar_state='expanded')
+init_database(ROOT)
+# PERSONNALISATION : thème et langue
+# Cette section ajoute deux contrôles toujours visibles dans la sidebar.
+THEMES={
+    "🌊 Ocean Blue":{"bg":"#EAF7FA","bg2":"#F8FCFD","side":"#0B5563","accent":"#0B8798"},
+    "🌿 Fresh Green":{"bg":"#EDF8F1","bg2":"#FAFDFB","side":"#14532D","accent":"#18864B"},
+    "🌌 Midnight":{"bg":"#111827","bg2":"#1F2937","side":"#0B1120","accent":"#2563EB"},
+    "☀️ Warm Sand":{"bg":"#FFF7E6","bg2":"#FFFCF5","side":"#78350F","accent":"#C46A12"},
+    "🪻 Purple Soft":{"bg":"#F5F1FC","bg2":"#FCFAFF","side":"#4C1D95","accent":"#7C3AED"},
+}
+LANGUAGES={
+    "🇫🇷 Français":{"source":"Source de données","pages":"Pages indexes","options":"Options","scrape":"🚀 Scrape data","download":"⬇️ Download scraped data","dashboard":"📊 Dashboard of the data","evaluate":"🧪 Evaluate the App","start":"🚀 START SCRAPING","theme":"🎨 Thème / arrière-plan","language":"🌐 Langue"},
+    "🇬🇧 English":{"source":"Data source","pages":"Page indexes","options":"Options","scrape":"🚀 Scrape data","download":"⬇️ Download scraped data","dashboard":"📊 Data dashboard","evaluate":"🧪 Evaluate the App","start":"🚀 START SCRAPING","theme":"🎨 Theme / background","language":"🌐 Language"},
+}
+st.sidebar.markdown("<div style='text-align:center;font-size:21px;font-weight:800;padding:8px 0 10px'>⚙️ PERSONNALISATION</div>",unsafe_allow_html=True)
+selected_language=st.sidebar.selectbox("🌐 Langue / Language",list(LANGUAGES.keys()),index=0,key="language_selector")
+L=LANGUAGES[selected_language]
+selected_theme=st.sidebar.selectbox(L["theme"],list(THEMES.keys()),index=0,key="theme_selector")
+THEME=THEMES[selected_theme]
+st.sidebar.markdown(f"<div style='text-align:center;padding:8px;border-radius:9px;background:rgba(255,255,255,.15);font-size:12px'>✓ {selected_theme}</div>",unsafe_allow_html=True)
+
+
+# DESIGN: thème personnalisé, cartes, animations CSS et boutons.
+st.markdown(f'''<style>
+.stApp{{background:linear-gradient(135deg,{THEME["bg"]},{THEME["bg2"]})}}
+section[data-testid="stSidebar"]{{background:linear-gradient(180deg,{THEME["side"]},{THEME["accent"]})}}
+section[data-testid="stSidebar"] *{{color:black!important}}
+.main-title{{font-size:42px;font-weight:850}}
+.hero{{position:relative;overflow:hidden;border-radius:24px;padding:38px;margin-bottom:25px;color:white;background:linear-gradient(120deg,{THEME["side"]},{THEME["accent"]},#18a4b5);box-shadow:0 15px 40px #064a5730}}
+.hero:before,.hero:after{{content:"";position:absolute;border-radius:50%;opacity:.2;animation:float 7s ease-in-out infinite}}
+.hero:before{{width:190px;height:190px;right:5%;top:-90px;background:white}}
+.hero:after{{width:100px;height:100px;right:30%;bottom:-60px;background:#66e9f7;animation-delay:1.4s}}
+@keyframes float{{0%,100%{{transform:translateY(0)}}50%{{transform:translateY(-18px)}}}}
+.hero-content{{position:relative;z-index:2}}
+.hero h1{{margin:0;font-size:42px}}
+.hero p{{font-size:17px;opacity:.92}}
+.card{{border:1px solid #d8e9ed;border-radius:18px;padding:20px;background:#ffffffdd;box-shadow:0 7px 25px #20505a12}}
+.source-card{{text-align:center;min-height:145px}}
+.source-icon{{font-size:42px}}
+.section-line{{height:3px;border-radius:4px;background:linear-gradient(90deg,{THEME["accent"]},#51d5e0,transparent);margin:8px 0 22px}}
+.stButton>button{{border-radius:13px;min-height:48px;font-weight:750;transition:.2s}}
+.stButton>button:hover{{transform:translateY(-2px);box-shadow:0 8px 20px #0a596633}}
+.live-dot{{display:inline-block;width:10px;height:10px;border-radius:50%;background:#22c875;animation:pulse 1.5s infinite;margin-right:7px}}
+@keyframes pulse{{70%{{box-shadow:0 0 0 10px transparent}}0%{{box-shadow:0 0 0 0 #22c87599}}}}
+</style>''',unsafe_allow_html=True)
+
+# FILE UTILS: sélection du fichier le plus récent et lecture sécurisée.
+def latest(files):
+    x=[f for f in files if f.exists()]
+    return max(x,key=lambda f:f.stat().st_mtime) if x else None
+
+def read_csv(path):
+    try:return pd.read_csv(path)
+    except Exception as e:st.error(f'Lecture impossible : {e}');return None
+
+# DATA EXPLORER: filtres avancés + pagination + export du résultat.
+# Cette section permet à l'utilisateur de :
+# 1) sélectionner plusieurs pages ;
+# 2) rechercher un texte dans toutes les colonnes textuelles ;
+# 3) filtrer les colonnes catégorielles ;
+# 4) filtrer automatiquement les colonnes numériques ;
+# 5) parcourir le résultat avec une pagination ;
+# 6) télécharger uniquement les lignes actuellement filtrées.
+
+def table_view(df, key):
+    st.markdown("### 🔎 Filtrer et parcourir les données")
+    st.caption(
+        "Utilisez plusieurs filtres simultanément. "
+        "Le tableau et le téléchargement sont mis à jour automatiquement."
+    )
+
+    work = df.copy()
+
+    # ---------------------------
+    # BARRE DE RECHERCHE GLOBALE
+    # ---------------------------
+    search = st.text_input(
+        "🔍 Recherche globale",
+        placeholder="Ex. Toyota, Camry, Poetry, Dakar, Manuelle...",
+        key=key + "_search",
+    )
+
+    if search.strip():
+        mask = pd.Series(False, index=work.index)
+        for col in work.columns:
+            if work[col].dtype == "object" or pd.api.types.is_string_dtype(work[col]):
+                mask = mask | work[col].astype(str).str.contains(
+                    search.strip(), case=False, na=False, regex=False
+                )
+        work = work[mask]
+
+    # ---------------------------
+    # FILTRES
+    # ---------------------------
+    with st.expander("⚙️ Filtres avancés", expanded=True):
+        f1, f2 = st.columns(2)
+
+        # Sélection multiple des pages.
+        if "page" in work.columns:
+            page_values = sorted(
+                pd.to_numeric(work["page"], errors="coerce")
+                .dropna()
+                .astype(int)
+                .unique()
+                .tolist()
+            )
+            with f1:
+                selected_pages = st.multiselect(
+                    "📄 Pages à afficher — sélection multiple",
+                    page_values,
+                    default=page_values,
+                    key=key + "_pages",
+                )
+            if selected_pages:
+                work = work[
+                    pd.to_numeric(work["page"], errors="coerce").isin(selected_pages)
+                ]
+            else:
+                work = work.iloc[0:0]
+
+        # Filtres catégoriels utiles : marque, modèle, catégorie, boîte, région...
+        categorical_candidates = []
+        for col in work.columns:
+            if col == "page":
+                continue
+            if work[col].dtype == "object" or pd.api.types.is_string_dtype(work[col]):
+                nunique = work[col].dropna().astype(str).nunique()
+                if 1 < nunique <= 40:
+                    categorical_candidates.append(col)
+
+        # On donne priorité aux colonnes métier les plus utiles.
+        priority = [
+            "category", "brand", "model", "gearbox",
+            "availability", "rating", "region"
+        ]
+        categorical_candidates.sort(
+            key=lambda c: (priority.index(c) if c in priority else 99, c)
+        )
+
+        for i, col in enumerate(categorical_candidates[:6]):
+            values = sorted(work[col].dropna().astype(str).unique().tolist())
+            selected = st.multiselect(
+                f"🏷️ {col}",
+                values,
+                key=f"{key}_cat_{col}",
+            )
+            if selected:
+                work = work[work[col].astype(str).isin(selected)]
+
+        # Filtres numériques : prix, année, kilométrage, reviews, etc.
+        numeric_cols = []
+        for col in work.columns:
+            numeric = pd.to_numeric(work[col], errors="coerce")
+            if numeric.notna().sum() > 0 and numeric.nunique(dropna=True) > 1:
+                numeric_cols.append(col)
+
+        preferred_numeric = [
+            "price", "mileage", "year", "reviews",
+            "products_count", "position_page"
+        ]
+        numeric_cols.sort(
+            key=lambda c: (
+                preferred_numeric.index(c) if c in preferred_numeric else 99,
+                c
+            )
+        )
+
+        for col in numeric_cols[:4]:
+            numeric = pd.to_numeric(work[col], errors="coerce").dropna()
+            if numeric.empty:
+                continue
+
+            minimum = float(numeric.min())
+            maximum = float(numeric.max())
+
+            if minimum == maximum:
+                continue
+
+            step = 1.0
+            if maximum >= 10000:
+                step = 1000.0
+            elif maximum >= 100:
+                step = 10.0
+
+            selected_range = st.slider(
+                f"📐 {col}",
+                min_value=minimum,
+                max_value=maximum,
+                value=(minimum, maximum),
+                step=step,
+                key=f"{key}_range_{col}",
+            )
+
+            numeric_all = pd.to_numeric(work[col], errors="coerce")
+            work = work[
+                numeric_all.between(
+                    selected_range[0],
+                    selected_range[1],
+                    inclusive="both",
+                )
+            ]
+
+    # ---------------------------
+    # PAGINATION
+    # ---------------------------
+    rows_col, page_col, info_col = st.columns([1, 1, 2])
+
+    with rows_col:
+        rows = st.selectbox(
+            "Lignes par page",
+            [10, 25, 50, 100],
+            index=1,
+            key=key + "_rows",
+        )
+
+    total_pages = max(1, (len(work) + rows - 1) // rows)
+
+    with page_col:
+        current_page = st.selectbox(
+            "Page du tableau",
+            list(range(1, total_pages + 1)),
+            index=0,
+            key=key + "_table_page",
+        )
+
+    with info_col:
+        st.metric(
+            "Résultats",
+            f"{len(work):,}",
+            help="Nombre de lignes après application de tous les filtres.",
+        )
+
+    first = (current_page - 1) * rows
+    last = first + rows
+    displayed = work.iloc[first:last]
+
+    st.dataframe(
+        displayed,
+        use_container_width=True,
+        height=470,
+        hide_index=True,
+    )
+
+    # ---------------------------
+    # EXPORT DES DONNÉES FILTRÉES
+    # ---------------------------
+    csv_data = work.to_csv(index=False).encode("utf-8-sig")
+
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        st.download_button(
+            "⬇️ Exporter le filtre",
+            data=csv_data,
+            file_name=f"{key}_filtered.csv",
+            mime="text/csv",
+            key=key + "_filtered_download",
+            use_container_width=True,
+        )
+    with c2:
+        st.caption(
+            f"Affichage : lignes {first + 1 if len(work) else 0}–"
+            f"{min(last, len(work))} sur {len(work):,} "
+            f"• page {current_page}/{total_pages}"
+        )
+
+    return work
+
+
+# ============================================================
+# ÉVALUATION DE L'APPLICATION
+# Cette section donne accès aux deux formulaires demandés par
+# le cahier des charges : KoboToolbox et Google Forms.
+#
+# Les URL sont saisies dans l'application car les liens réels
+# des formulaires ne nous ont pas encore été fournis.
+# Tant qu'une URL n'est pas configurée, le bouton reste désactivé.
+# ============================================================
+
+EVALUATION_QUESTIONS = [
+    ("SECTION 1 : Informations sur l’évaluateur", "Date de l’évaluation", "Date", "Obligatoire"),
+    ("SECTION 1 : Informations sur l’évaluateur", "Votre nom (facultatif)", "Texte", "Non obligatoire"),
+    ("SECTION 1 : Informations sur l’évaluateur", "Votre rôle / profession", "Sélection unique", "Obligatoire"),
+    ("SECTION 1 : Informations sur l’évaluateur", "Autre profession", "Texte", "Conditionnel : rôle = Autre"),
+    ("SECTION 1 : Informations sur l’évaluateur", "Comment avez-vous accédé à l’application ?", "Sélection unique", "Obligatoire"),
+    ("SECTION 1 : Informations sur l’évaluateur", "Est-ce votre première utilisation de l’application ?", "Sélection unique", "Obligatoire"),
+    ("SECTION 1 : Informations sur l’évaluateur", "Combien de fois l’avez-vous utilisée auparavant ?", "Sélection unique", "Conditionnel : première utilisation = Non"),
+
+    ("SECTION 2 : Première impression et interface", "L’interface est attrayante et bien conçue", "Sélection unique — Likert 5 points", "Obligatoire"),
+    ("SECTION 2 : Première impression et interface", "L’application est facile à naviguer", "Sélection unique — Likert 5 points", "Obligatoire"),
+    ("SECTION 2 : Première impression et interface", "Les menus et les boutons sont clairement libellés", "Sélection unique — Likert 5 points", "Obligatoire"),
+    ("SECTION 2 : Première impression et interface", "L’application se charge rapidement", "Sélection unique — Likert 5 points", "Obligatoire"),
+    ("SECTION 2 : Première impression et interface", "L’application fonctionne bien sur mon appareil", "Sélection unique — Likert 5 points", "Obligatoire"),
+
+    ("SECTION 3 : Fonctionnalités et performances", "Quelles fonctionnalités avez-vous testées ?", "Sélection multiple", "Obligatoire"),
+    ("SECTION 3 : Fonctionnalités et performances", "Les fonctionnalités répondent à mes besoins", "Sélection unique — Likert 5 points", "Obligatoire"),
+    ("SECTION 3 : Fonctionnalités et performances", "Les fonctionnalités sont faciles à utiliser", "Sélection unique — Likert 5 points", "Obligatoire"),
+    ("SECTION 3 : Fonctionnalités et performances", "Les résultats fournis sont précis", "Sélection unique — Likert 5 points", "Obligatoire"),
+    ("SECTION 3 : Fonctionnalités et performances", "L’application m’aide à accomplir mes tâches efficacement", "Sélection unique — Likert 5 points", "Obligatoire"),
+    ("SECTION 3 : Fonctionnalités et performances", "Les instructions et l’aide sont claires et utiles", "Sélection unique — Likert 5 points", "Obligatoire"),
+
+    ("SECTION 4 : Problèmes rencontrés", "Avez-vous rencontré des problèmes ou des erreurs ?", "Sélection unique", "Obligatoire"),
+    ("SECTION 4 : Problèmes rencontrés", "Quel(s) type(s) de problème(s) ?", "Sélection multiple", "Conditionnel : problèmes = Oui"),
+    ("SECTION 4 : Problèmes rencontrés", "Veuillez décrire le(s) problème(s) en détail", "Texte multilignes", "Conditionnel : problèmes = Oui"),
+
+    ("SECTION 5 : Satisfaction globale", "Note globale de l’application", "Entier 0–10", "Obligatoire"),
+    ("SECTION 5 : Satisfaction globale", "Niveau de satisfaction", "Calcul / lecture seule", "Automatique"),
+    ("SECTION 5 : Satisfaction globale", "Recommanderiez-vous cette application ?", "Sélection unique", "Obligatoire"),
+    ("SECTION 5 : Satisfaction globale", "Utiliseriez-vous cette application à nouveau ?", "Sélection unique", "Obligatoire"),
+
+    ("SECTION 6 : Suggestions d’amélioration", "Quels sont les principaux points forts de cette application ?", "Texte multilignes", "Obligatoire"),
+    ("SECTION 6 : Suggestions d’amélioration", "Qu’est-ce qui pourrait être amélioré ?", "Texte multilignes", "Obligatoire"),
+    ("SECTION 6 : Suggestions d’amélioration", "Quelles fonctionnalités manquantes aimeriez-vous voir ajoutées ?", "Texte multilignes", "Non obligatoire"),
+    ("SECTION 6 : Suggestions d’amélioration", "Commentaires ou suggestions supplémentaires", "Texte multilignes", "Non obligatoire"),
+    ("NOTE FINALE", "Merci pour votre précieux retour ! Vos commentaires nous aideront à améliorer l’application.", "Note", "—"),
+]
+
+def evaluation_dashboard():
+    """Page d’évaluation basée exclusivement sur le questionnaire fourni."""
+    st.markdown("## 🧪 Évaluation de l’application")
+    st.markdown('<div class="section-line"></div>', unsafe_allow_html=True)
+
+    st.info(
+        "Le questionnaire ci-dessous reprend le formulaire officiel fourni pour "
+        "les deux versions : KoboToolbox et Google Forms."
+    )
+
+    st.markdown("### 🔗 Accès aux deux formulaires")
+
+    direct_kobo, direct_google = st.columns(2)
+    with direct_kobo:
+        st.link_button(
+            "📝 Ouvrir le formulaire KoboToolbox",
+            "https://ee.kobotoolbox.org/x/1oNIZ8OJ",
+            use_container_width=True,
+        )
+    with direct_google:
+        st.link_button(
+            "📋 Ouvrir le formulaire Google Forms",
+            "https://docs.google.com/forms/d/e/1FAIpQLScFmWJm7vxf0UYLhoVVr1V4UBpOADke6rzt1CrV4rgnFE2Wmg/viewform?usp=header",
+            use_container_width=True,
+        )
+
+    st.caption("Les liens publiés sont maintenant intégrés à l'application.")
+
+    kobo_url = st.text_input(
+        "📝 Lien KoboToolbox",
+        value=st.session_state.get("kobo_url", "https://ee.kobotoolbox.org/x/1oNIZ8OJ"),
+        placeholder="Colle ici le lien réel du formulaire KoboToolbox",
+        key="kobo_url_input_final",
+    )
+    google_url = st.text_input(
+        "📋 Lien Google Forms",
+        value=st.session_state.get("google_url", "https://docs.google.com/forms/d/e/1FAIpQLScFmWJm7vxf0UYLhoVVr1V4UBpOADke6rzt1CrV4rgnFE2Wmg/viewform?usp=header"),
+        placeholder="Colle ici le lien réel de Google Forms",
+        key="google_url_input_final",
+    )
+
+    st.session_state["kobo_url"] = kobo_url.strip()
+    st.session_state["google_url"] = google_url.strip()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(
+            '<div class="card source-card"><div class="source-icon">📝</div>'
+            '<h3>KoboToolbox</h3><p>Version officielle du questionnaire.</p></div>',
+            unsafe_allow_html=True,
+        )
+        if kobo_url.strip():
+            st.link_button(
+                "📝 Ouvrir KoboToolbox",
+                kobo_url.strip(),
+                use_container_width=True,
+            )
+        else:
+            st.warning("Le lien KoboToolbox n’est pas encore configuré.")
+
+    with c2:
+        st.markdown(
+            '<div class="card source-card"><div class="source-icon">📋</div>'
+            '<h3>Google Forms</h3><p>Version officielle du questionnaire.</p></div>',
+            unsafe_allow_html=True,
+        )
+        if google_url.strip():
+            st.link_button(
+                "📋 Ouvrir Google Forms",
+                google_url.strip(),
+                use_container_width=True,
+            )
+        else:
+            st.warning("Le lien Google Forms n’est pas encore configuré.")
+
+    st.markdown("### 📋 Questionnaire officiel")
+
+    qdf = pd.DataFrame(
+        EVALUATION_QUESTIONS,
+        columns=["Section", "Question", "Type", "Obligation / logique"],
+    )
+    st.dataframe(qdf, use_container_width=True, hide_index=True, height=520)
+
+    with st.expander("📌 Échelles et règles du questionnaire", expanded=False):
+        st.markdown(
+            """
+            **Échelle Likert :**
+            - Tout à fait en désaccord
+            - En désaccord
+            - Neutre
+            - D’accord
+            - Tout à fait d’accord
+
+            **Note globale :** entier de 0 à 10.
+
+            **Niveau de satisfaction calculé :**
+            - 9–10 : Excellent
+            - 7–8 : Très bon
+            - 5–6 : Bon
+            - 3–4 : Passable
+            - 0–2 : Médiocre
+
+            **Logiques conditionnelles :**
+            - « Autre profession » si le rôle est « Autre ».
+            - Nombre d’utilisations si la première utilisation est « Non ».
+            - Type et détail du problème si un problème est signalé.
+            """
+        )
+
+
+# RUN SCRAPER: exécute un script existant avec UTF-8 et logs en direct.
+def run_script(script):
+    if not script.exists():st.error(f'Script introuvable : {script}');return False
+    env=os.environ.copy();env['PYTHONIOENCODING']='utf-8';env['PYTHONUTF8']='1'
+    box=st.empty();lines=[]
+    proc=subprocess.Popen([sys.executable,str(script)],cwd=str(ROOT),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8',errors='replace',bufsize=1,env=env)
+    for line in proc.stdout:
+        if line.strip():lines.append(line.rstrip());box.code('\n'.join(lines[-35:]),language='text')
+    proc.wait()
+    if proc.returncode:st.error(f'❌ {script.name} a échoué (code {proc.returncode}).');return False
+    st.success(f'✅ {script.name} terminé.');return True
+
+# BOOK SCRAPER: lance Books puis la complétion des détails.
+def scrape_books():
+    if not run_script(BOOKS):return False
+    if BOOKS_DETAILS.exists() and (CLEANED/'books_full.csv').exists() and not run_script(BOOKS_DETAILS):return False
+    f=latest(BOOK_FILES)
+    if f:
+        st.success(f'📄 Fichier Books : {f.name}')
+        try:
+            n = sync_dataset(ROOT, "books", f)
+            st.success(f'🗄️ SQL synchronisée : {n:,} lignes dans la table books.')
+        except Exception as e:
+            st.warning(f'⚠️ Fichier créé, mais synchronisation SQL impossible : {e}')
+        st.session_state.last_output=str(f)
+        return True
+    return False
+
+# GAARAAS SCRAPER: utilise prioritairement le script de reprise validé.
+def scrape_gaaraas():
+    script=GAARAAS_RESUME if GAARAAS_RESUME.exists() else GAARAAS
+    if not run_script(script):return False
+    f=latest(GAARAAS_FILES)
+    if f:
+        st.success(f'📄 Fichier Gaaraas : {f.name}')
+        try:
+            n = sync_dataset(ROOT, "gaaraas", f)
+            st.success(f'🗄️ SQL synchronisée : {n:,} lignes dans la table gaaraas.')
+        except Exception as e:
+            st.warning(f'⚠️ Fichier créé, mais synchronisation SQL impossible : {e}')
+        st.session_state.last_output=str(f)
+        return True
+    return False
+
+# DOWNLOAD: expose les fichiers RAW et CLEANED au téléchargement.
+def downloads(files):
+    found=[f for f in files if f.exists()]
+    if not found:st.warning('Aucun fichier disponible.');return
+    for f in found:
+        c1,c2=st.columns([3,1]);c1.write(f'📄 **{f.name}**');c2.download_button('⬇️ Télécharger',f.read_bytes(),f.name,'text/csv',key='dl_'+str(f),use_container_width=True)
+
+# BOOK DASHBOARD: indicateurs, graphiques et tableau filtrable Books.
+def books_dashboard():
+    f=latest(BOOK_FILES)
+    if not f:st.warning('Aucun dataset Books disponible.');return
+    df=read_csv(f)
+    if df is None:return
+    st.markdown('## 📚 Books to Scrape');st.markdown('<div class="section-line"></div>',unsafe_allow_html=True)
+    price=pd.to_numeric(df['price'].astype(str).str.replace('£','',regex=False),errors='coerce') if 'price' in df else pd.Series(dtype=float)
+    rating=df['rating'].map({'One':1,'Two':2,'Three':3,'Four':4,'Five':5}) if 'rating' in df else pd.Series(dtype=float)
+    a,b,c,d=st.columns(4);a.metric('📚 Livres',f'{len(df):,}');b.metric('💷 Prix moyen',f'£{price.mean():.2f}' if price.notna().any() else 'N/A');c.metric('⭐ Note moyenne',f'{rating.mean():.2f}/5' if rating.notna().any() else 'N/A');d.metric('🏷️ Catégories',df['category'].nunique() if 'category' in df else 'N/A')
+    x,y=st.columns(2)
+    with x:
+        if 'category' in df:st.markdown('### 📊 Livres par catégorie');st.bar_chart(df['category'].value_counts().head(15))
+    with y:
+        if 'category' in df and price.notna().any():
+            t=pd.DataFrame({'category':df['category'],'price':price});st.markdown('### 💷 Prix moyen par catégorie');st.bar_chart(t.groupby('category')['price'].mean().sort_values(ascending=False).head(15))
+    table_view(df,'books')
+
+# GAARAAS DASHBOARD: indicateurs, graphiques et tableau filtrable Gaaraas.
+def gaaraas_dashboard():
+    f=latest(GAARAAS_FILES)
+    if not f:st.warning('Aucun dataset Gaaraas disponible.');return
+    df=read_csv(f)
+    if df is None:return
+    st.markdown('## 🚗 Gaaraas');st.markdown('<div class="section-line"></div>',unsafe_allow_html=True)
+    price=pd.to_numeric(df['price'],errors='coerce') if 'price' in df else pd.Series(dtype=float);mileage=pd.to_numeric(df['mileage'],errors='coerce') if 'mileage' in df else pd.Series(dtype=float)
+    a,b,c,d=st.columns(4);a.metric('🚗 Annonces',f'{len(df):,}');b.metric('💰 Prix moyen',f'{price.mean():,.0f} XOF' if price.notna().any() else 'N/A');c.metric('🛣️ Kilométrage moyen',f'{mileage.mean():,.0f} km' if mileage.notna().any() else 'N/A');d.metric('🏷️ Marques',df['brand'].nunique() if 'brand' in df else 'N/A')
+    x,y=st.columns(2)
+    with x:
+        if 'brand' in df:st.markdown('### 📊 Annonces par marque');st.bar_chart(df['brand'].value_counts().head(15))
+    with y:
+        if 'gearbox' in df:st.markdown('### ⚙️ Boîtes de vitesses');st.bar_chart(df['gearbox'].value_counts())
+    table_view(df,'gaaraas')
+
+
+# SQL DATABASE: interface de synchronisation, contrôle et consultation SQL.
+def database_dashboard():
+    st.markdown("## 🗄️ Base de données SQL")
+    st.markdown('<div class="section-line"></div>', unsafe_allow_html=True)
+
+    db_file = database_path(ROOT)
+    st.info(
+        "La base SQL stocke une table par source : `books` et `gaaraas`. "
+        "Les données nettoyées sont synchronisées automatiquement après un scraping réussi."
+    )
+
+    a, b, c = st.columns(3)
+    a.metric("📦 Tables", len([t for t in list_tables(ROOT) if t in ("books", "gaaraas")]))
+    b.metric("📚 Books", f"{table_count(ROOT, 'books'):,}")
+    c.metric("🚗 Gaaraas", f"{table_count(ROOT, 'gaaraas'):,}")
+
+    st.caption(f"Fichier SQL local : `{db_file}` • Taille : {database_size(ROOT) / 1024:.1f} KB")
+
+    st.markdown("### 🔄 Synchroniser les fichiers nettoyés vers SQL")
+
+    sync_col1, sync_col2 = st.columns(2)
+
+    with sync_col1:
+        books_file = latest(BOOK_FILES)
+        if books_file:
+            st.write(f"📚 **Books** — `{books_file.name}`")
+            if st.button("🔄 Synchroniser Books", use_container_width=True):
+                try:
+                    n = sync_dataset(ROOT, "books", books_file)
+                    st.success(f"✅ {n:,} lignes enregistrées dans `books`.")
+                except Exception as e:
+                    st.error(f"❌ Synchronisation Books : {e}")
+        else:
+            st.warning("Aucun fichier Books disponible.")
+
+    with sync_col2:
+        gaaraas_file = latest(GAARAAS_FILES)
+        if gaaraas_file:
+            st.write(f"🚗 **Gaaraas** — `{gaaraas_file.name}`")
+            if st.button("🔄 Synchroniser Gaaraas", use_container_width=True):
+                try:
+                    n = sync_dataset(ROOT, "gaaraas", gaaraas_file)
+                    st.success(f"✅ {n:,} lignes enregistrées dans `gaaraas`.")
+                except Exception as e:
+                    st.error(f"❌ Synchronisation Gaaraas : {e}")
+        else:
+            st.warning("Aucun fichier Gaaraas disponible.")
+
+    st.markdown("### 🔎 Consulter les données depuis SQL")
+
+    table_choice = st.selectbox(
+        "Table SQL",
+        ["books", "gaaraas"],
+        key="sql_table_choice",
+    )
+
+    if table_count(ROOT, table_choice) > 0:
+        sql_df = read_table(ROOT, table_choice)
+        st.success(f"Connexion SQL OK — {len(sql_df):,} lignes dans `{table_choice}`.")
+        table_view(sql_df, "sql_" + table_choice)
+    else:
+        st.warning(
+            f"La table `{table_choice}` ne contient encore aucune donnée. "
+            "Lancez un scraping ou utilisez le bouton de synchronisation."
+        )
+
+# EVALUATION: contrôle technique avant branchement des formulaires Kobo/Google Forms.
+def evaluation():
+    st.markdown(f"## {L['evaluate']}");st.markdown('<div class="section-line"></div>',unsafe_allow_html=True)
+    for name,f in [('📚 Books scraper',BOOKS),('📚 Books détails',BOOKS_DETAILS),('🚗 Gaaraas scraper',GAARAAS),('🔄 Gaaraas reprise',GAARAAS_RESUME)]:
+        st.success(f'✅ {name} disponible' if f.exists() else f'❌ {name} introuvable')
+    for f in BOOK_FILES+GAARAAS_FILES:
+        if f.exists():
+            try:st.info(f'📄 {f.name} — {len(pd.read_csv(f)):,} lignes')
+            except:st.warning(f'⚠️ {f.name} est présent mais illisible.')
+
+# SIDEBAR: navigation inspirée du visuel de référence.
+st.sidebar.markdown('<div style="text-align:center;font-size:23px;font-weight:800;padding:8px 0 18px">📊 DATA COLLECTION TP</div>',unsafe_allow_html=True)
+source=st.sidebar.selectbox(L["source"],['📚 Books to Scrape','🚗 Gaaraas'])
+pages=st.sidebar.number_input(L["pages"],1,100,50 if source.startswith('📚') else 13)
+mode=st.sidebar.selectbox(L["options"],[L["scrape"],L["download"],L["dashboard"],L["evaluate"]])
+st.sidebar.markdown('---');st.sidebar.caption('Collect → RAW → Clean → Analyze → Download' if selected_language.startswith('🇬🇧') else 'Collecte → RAW → Nettoyage → Analyse → Téléchargement')
+
+# HOME HEADER: animation et présentation de l'application.
+st.markdown('<div class="hero"><div class="hero-content"><h1>MY DATA COLLECTION APP</h1><p>Plateforme interactive de scraping, nettoyage, téléchargement et visualisation.</p></div></div>',unsafe_allow_html=True)
+
+if mode==L['scrape']:
+    st.markdown(f"## {L['scrape']}");st.write(f'Source : **{source}** • Pages configurées : **{pages}**')
+    st.markdown('<div class="card"><span class="live-dot"></span><b>Application prête</b><br><small>Les scrapers existants sont exécutés sans modifier leur logique interne.</small></div>',unsafe_allow_html=True)
+    if st.button(L['start'],type='primary',use_container_width=True):
+        start=time.time()
+        with st.spinner('Collecte des données en cours...'):
+            ok=scrape_books() if source.startswith('📚') else scrape_gaaraas()
+        if ok:
+            f=latest(BOOK_FILES if source.startswith('📚') else GAARAAS_FILES)
+            st.success(f'🎉 Collecte terminée en {time.time()-start:.1f} secondes.')
+            if f:st.download_button('⬇️ Télécharger immédiatement le résultat',f.read_bytes(),f.name,'text/csv',use_container_width=True)
+
+elif mode==L['download']:
+    st.markdown(f"## {L['download']}");st.write('Téléchargez les données RAW et CLEANED disponibles.');downloads(BOOK_FILES if source.startswith('📚') else GAARAAS_FILES)
+
+elif mode==L['dashboard']:
+    st.markdown(f"## {L['dashboard']}");st.write('Filtrez les pages et explorez les indicateurs.');books_dashboard() if source.startswith('📚') else gaaraas_dashboard()
+
+elif mode=='🗄️ SQL Database':
+    database_dashboard()
+
+else:
+    evaluation()
