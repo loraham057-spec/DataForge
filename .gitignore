@@ -31,3 +31,4 @@ data/cache/
 # Fichiers de sauvegarde temporaires
 *.bak
 *.backup
+venv312/
