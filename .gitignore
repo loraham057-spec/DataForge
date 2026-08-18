@@ -1,27 +1,33 @@
-﻿__pycache__/
+﻿# Python
+__pycache__/
 *.py[cod]
 *.pyo
 
+# Environnements virtuels
 .venv/
 venv/
 env/
 
+# Variables d'environnement / secrets
 .env
 .env.*
+.streamlit/secrets.toml
 
+# Logs
 *.log
 
+# IDE
 .vscode/
 .idea/
 
+# OS
 .DS_Store
 
-*.db
-*.sqlite
-*.sqlite3
-
+# Données temporaires
 data/raw/
 data/temp/
 data/cache/
 
-.streamlit/secrets.toml
+# Fichiers de sauvegarde temporaires
+*.bak
+*.backup
