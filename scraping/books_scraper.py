@@ -1,6 +1,7 @@
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
@@ -38,21 +39,123 @@ WAIT_TIME = 10
 # ============================================================
 
 def create_driver():
-    """Créer et configurer le navigateur Chrome."""
+    """
+    Crée un navigateur Selenium compatible Windows et
+    Streamlit Community Cloud/Linux.
+
+    Sur Linux/Cloud, on privilégie Chromium + ChromeDriver
+    installés par le système (packages.txt).
+    Sur Windows, Selenium Manager reste le fallback.
+    """
+
+    import os
+    import shutil
+    import platform
 
     options = Options()
 
-    # Navigateur visible pendant les tests
-    options.add_argument("--start-maximized")
-
-    # Désactiver certaines notifications Chrome
+    # -------------------------------------------------
+    # Mode serveur / Cloud
+    # -------------------------------------------------
+    # Headless fonctionne aussi sur Windows.
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-infobars")
     options.add_argument("--disable-notifications")
+    options.add_argument("--window-size=1920,1080")
 
-    driver = webdriver.Chrome(
-        options=options
+    # -------------------------------------------------
+    # User-Agent
+    # -------------------------------------------------
+    options.add_argument(
+        "--user-agent="
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
     )
 
-    driver.set_page_load_timeout(30)
+    # -------------------------------------------------
+    # Recherche du navigateur
+    # -------------------------------------------------
+    browser_candidates = [
+        os.environ.get("CHROME_BIN"),
+        os.environ.get("CHROMIUM_BIN"),
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+    ]
+
+    browser_path = next(
+        (
+            path for path in browser_candidates
+            if path and os.path.isfile(path)
+        ),
+        None,
+    )
+
+    # Sur Windows, Selenium Manager peut trouver Chrome
+    # automatiquement : inutile de forcer un chemin Linux.
+    if browser_path:
+        options.binary_location = browser_path
+
+    # -------------------------------------------------
+    # Recherche de ChromeDriver
+    # -------------------------------------------------
+    driver_candidates = [
+        os.environ.get("CHROMEDRIVER_PATH"),
+        shutil.which("chromedriver"),
+        "/usr/bin/chromedriver",
+        "/usr/lib/chromium/chromedriver",
+        "/usr/lib/chromium-browser/chromedriver",
+    ]
+
+    driver_path = next(
+        (
+            path for path in driver_candidates
+            if path and os.path.isfile(path)
+        ),
+        None,
+    )
+
+    # -------------------------------------------------
+    # Création du WebDriver
+    # -------------------------------------------------
+    try:
+        if driver_path:
+            service = Service(driver_path)
+            driver = webdriver.Chrome(
+                service=service,
+                options=options,
+            )
+        else:
+            # Fallback : Selenium Manager.
+            # Utile notamment sur Windows.
+            driver = webdriver.Chrome(
+                options=options
+            )
+
+    except WebDriverException as error:
+        system = platform.system()
+
+        raise RuntimeError(
+            "Impossible de démarrer Chromium/ChromeDriver.\n"
+            f"Système détecté : {system}\n"
+            f"Navigateur détecté : {browser_path or 'aucun'}\n"
+            f"ChromeDriver détecté : {driver_path or 'aucun'}\n\n"
+            "Sur Streamlit Cloud, vérifiez que packages.txt contient :\n"
+            "chromium\n"
+            "chromium-driver\n\n"
+            f"Erreur Selenium : {error}"
+        ) from error
+
+    driver.set_page_load_timeout(60)
+    driver.implicitly_wait(10)
 
     return driver
 
@@ -661,24 +764,27 @@ def save_data(
 ):
     """Sauvegarder les données dans un fichier CSV."""
 
-    if not data:
-
-        return
-
     os.makedirs(
         OUTPUT_DIR,
         exist_ok=True
     )
 
-    df = pd.DataFrame(
-        data
-    )
+    # Accepte une liste de dictionnaires ou un DataFrame.
+    if isinstance(data, pd.DataFrame):
+        df = data.copy()
+    else:
+        df = pd.DataFrame(data)
+
+    if df.empty:
+        return df
 
     df.to_csv(
         filename,
         index=False,
         encoding="utf-8-sig"
     )
+
+    return df
 
 
 # ============================================================
@@ -808,8 +914,23 @@ def scrape_all_books(
         # DATAFRAME FINAL
         # ====================================================
 
+        columns = [
+            "page",
+            "position_page",
+            "title",
+            "price",
+            "availability",
+            "rating",
+            "reviews",
+            "description",
+            "category",
+            "tax",
+            "book_url",
+        ]
+
         df = pd.DataFrame(
-            all_results
+            all_results,
+            columns=columns,
         )
 
         duration = (
@@ -896,24 +1017,23 @@ def print_final_report(
     if len(df) == expected_books:
 
         print()
+        print("✅ CONTRÔLE OK")
         print(
-            "✅ CONTRÔLE OK"
-        )
-
-        print(
-            "Les 1 000 livres ont été récupérés."
+            f"Tous les {expected_books} livres attendus "
+            "ont été récupérés."
         )
 
     else:
 
-        missing = (
-            expected_books - len(df)
+        missing = max(
+            expected_books - len(df),
+            0
         )
 
         print()
         print(
             f"⚠️ ATTENTION : "
-            f"{missing} livre(s) manquant(s)."
+            f"{missing} livre(s) potentiellement manquant(s)."
         )
 
     # --------------------------------------------------------
